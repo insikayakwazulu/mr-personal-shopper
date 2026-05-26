@@ -7,14 +7,12 @@ function isMongoId(id) {
 }
 
 function getCloudinaryPublicId(url) {
-	// expects something like: https://res.cloudinary.com/.../image/upload/v123/products/abc123.jpg
-	// returns "products/abc123"
 	if (!url) return null;
 
 	try {
 		const parts = url.split("/");
-		const filename = parts[parts.length - 1]; // abc123.jpg
-		const folder = parts[parts.length - 2]; // products
+		const filename = parts[parts.length - 1];
+		const folder = parts[parts.length - 2];
 		if (!filename || !folder) return null;
 
 		const nameWithoutExt = filename.split(".")[0];
@@ -25,19 +23,15 @@ function getCloudinaryPublicId(url) {
 }
 
 async function uploadOneImageToCloudinary(imageBase64OrUrl) {
-	// If admin sends a base64 string, upload it.
-	// If it's already a URL, return as-is.
 	if (!imageBase64OrUrl) return "";
 
 	const str = String(imageBase64OrUrl);
 
-	// crude check: base64 data urls usually start with "data:image/"
 	if (str.startsWith("data:image/")) {
 		const res = await cloudinary.uploader.upload(str, { folder: "products" });
 		return res?.secure_url || "";
 	}
 
-	// If it's not base64, assume it’s a URL already
 	return str;
 }
 
@@ -53,6 +47,32 @@ async function uploadManyImagesToCloudinary(images = []) {
 	return uploaded;
 }
 
+async function cleanVariantsWithUploadedImages(variants = []) {
+	if (!Array.isArray(variants)) return [];
+
+	const cleanVariants = [];
+
+	for (const v of variants) {
+		const variantImages = await uploadManyImagesToCloudinary(v?.images || []);
+
+		cleanVariants.push({
+			sku: v?.sku || "",
+			color: v?.color || "",
+			size: v?.size || "",
+			stock: Number(v?.stock) >= 0 ? Number(v.stock) : 0,
+			images: variantImages,
+			priceOverride:
+				v?.priceOverride === null || v?.priceOverride === undefined || v?.priceOverride === ""
+					? null
+					: Number(v.priceOverride) >= 0
+						? Number(v.priceOverride)
+						: null,
+		});
+	}
+
+	return cleanVariants;
+}
+
 export const getAllProducts = async (req, res) => {
 	try {
 		const products = await Product.find({}).lean();
@@ -65,13 +85,11 @@ export const getAllProducts = async (req, res) => {
 
 export const getFeaturedProducts = async (req, res) => {
 	try {
-		// ✅ If Redis is off, just fetch from MongoDB
 		if (!redis) {
 			const featuredProducts = await Product.find({ isFeatured: true }).lean();
 			return res.json({ products: featuredProducts || [] });
 		}
 
-		// ✅ Redis on: try cache first
 		const cached = await redis.get("featured_products");
 		if (cached) {
 			const parsed = JSON.parse(cached);
@@ -88,14 +106,6 @@ export const getFeaturedProducts = async (req, res) => {
 	}
 };
 
-/**
- * ✅ Get single product by ID (for Product Details page)
- * GET /api/products/:id
- *
- * IMPORTANT:
- * Returns the product object directly (NOT { product })
- * so your ProductDetailsPage.jsx (setProduct(res.data)) works.
- */
 export const getProductById = async (req, res) => {
 	try {
 		const { id } = req.params;
@@ -107,7 +117,6 @@ export const getProductById = async (req, res) => {
 		const product = await Product.findById(id).lean();
 		if (!product) return res.status(404).json({ message: "Product not found" });
 
-		// ✅ return product directly
 		return res.json(product);
 	} catch (error) {
 		console.log("Error in getProductById controller", error.message);
@@ -115,18 +124,6 @@ export const getProductById = async (req, res) => {
 	}
 };
 
-/**
- * ✅ Create product (admin)
- * Supports:
- * - image (required)
- * - images[] (optional, for gallery)
- * - originalPrice (optional)
- * - stockQuantity, lowStockThreshold (optional)
- * - options.colors[], options.sizes[] (optional)
- * - variants[] (optional)
- *
- * ZAR only.
- */
 export const createProduct = async (req, res) => {
 	try {
 		const {
@@ -143,23 +140,19 @@ export const createProduct = async (req, res) => {
 			variants,
 		} = req.body;
 
-		// Basic validation
 		if (!name || !description || price === undefined || price === null || !image || !category) {
 			return res.status(400).json({
 				message: "Missing required fields: name, description, price, image, category",
 			});
 		}
 
-		// Upload main image
 		const mainImageUrl = await uploadOneImageToCloudinary(image);
+
 		if (!mainImageUrl) {
 			return res.status(400).json({ message: "Image upload failed" });
 		}
 
-		// Upload gallery images (optional)
 		const galleryUrls = await uploadManyImagesToCloudinary(images);
-
-		// Ensure images includes the main image first
 		const finalImages = [mainImageUrl, ...galleryUrls].filter(Boolean);
 
 		const cleanOptions = {
@@ -167,20 +160,7 @@ export const createProduct = async (req, res) => {
 			sizes: Array.isArray(options?.sizes) ? options.sizes.filter(Boolean) : [],
 		};
 
-		const cleanVariants = Array.isArray(variants)
-			? variants.map((v) => ({
-					sku: v?.sku || "",
-					color: v?.color || "",
-					size: v?.size || "",
-					stock: Number(v?.stock) >= 0 ? Number(v.stock) : 0,
-					priceOverride:
-						v?.priceOverride === null || v?.priceOverride === undefined
-							? null
-							: Number(v.priceOverride) >= 0
-								? Number(v.priceOverride)
-								: null,
-			  }))
-			: [];
+		const cleanVariants = await cleanVariantsWithUploadedImages(variants);
 
 		const product = await Product.create({
 			name: String(name).trim(),
@@ -203,7 +183,6 @@ export const createProduct = async (req, res) => {
 			variants: cleanVariants,
 		});
 
-		// If a featured product was created, cache may be stale; safe to refresh later via toggle.
 		return res.status(201).json({ product });
 	} catch (error) {
 		console.log("Error in createProduct controller", error.message);
@@ -219,10 +198,18 @@ export const deleteProduct = async (req, res) => {
 			return res.status(404).json({ message: "Product not found" });
 		}
 
-		// ✅ Delete ALL images from cloudinary (image + images[])
 		const allImages = new Set();
+
 		if (product.image) allImages.add(product.image);
 		if (Array.isArray(product.images)) product.images.forEach((u) => u && allImages.add(u));
+
+		if (Array.isArray(product.variants)) {
+			product.variants.forEach((variant) => {
+				if (Array.isArray(variant.images)) {
+					variant.images.forEach((u) => u && allImages.add(u));
+				}
+			});
+		}
 
 		for (const url of allImages) {
 			const publicId = getCloudinaryPublicId(url);
@@ -237,7 +224,6 @@ export const deleteProduct = async (req, res) => {
 
 		await Product.findByIdAndDelete(req.params.id);
 
-		// if featured deleted, refresh cache
 		await updateFeaturedProductsCache();
 
 		return res.json({ message: "Product deleted successfully" });
@@ -262,6 +248,7 @@ export const getRecommendedProducts = async (req, res) => {
 					stockQuantity: 1,
 					currency: 1,
 					category: 1,
+					variants: 1,
 				},
 			},
 		]);
@@ -275,6 +262,7 @@ export const getRecommendedProducts = async (req, res) => {
 
 export const getProductsByCategory = async (req, res) => {
 	const { category } = req.params;
+
 	try {
 		const products = await Product.find({ category }).lean();
 		return res.json({ products: products || [] });
@@ -287,14 +275,15 @@ export const getProductsByCategory = async (req, res) => {
 export const toggleFeaturedProduct = async (req, res) => {
 	try {
 		const product = await Product.findById(req.params.id);
+
 		if (product) {
 			product.isFeatured = !product.isFeatured;
 			const updatedProduct = await product.save();
 			await updateFeaturedProductsCache();
 			return res.json({ product: updatedProduct });
-		} else {
-			return res.status(404).json({ message: "Product not found" });
 		}
+
+		return res.status(404).json({ message: "Product not found" });
 	} catch (error) {
 		console.log("Error in toggleFeaturedProduct controller", error.message);
 		return res.status(500).json({ message: "Server error", error: error.message });

@@ -4,14 +4,20 @@ const variantSchema = new mongoose.Schema(
 	{
 		sku: { type: String, trim: true, default: "" },
 
-		// For now: color + size variants (phones later)
+		// Variant identity
 		color: { type: String, trim: true, default: "" },
 		size: { type: String, trim: true, default: "" },
 
-		// Stock per variant
+		// Stock per exact combination: color + size
 		stock: { type: Number, min: 0, default: 0 },
 
-		// Optional: some variants might be priced differently (rare)
+		// Images for this exact variant/color
+		images: {
+			type: [String],
+			default: [],
+		},
+
+		// Optional: some variants might be priced differently
 		priceOverride: { type: Number, min: 0, default: null },
 	},
 	{ _id: false }

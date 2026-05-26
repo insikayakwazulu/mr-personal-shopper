@@ -15,7 +15,6 @@ const ProductDetailsPage = () => {
 	const [loading, setLoading] = useState(true);
 	const [error, setError] = useState("");
 
-	// ✅ selections
 	const [selectedImage, setSelectedImage] = useState("");
 	const [selectedColor, setSelectedColor] = useState("");
 	const [selectedSize, setSelectedSize] = useState("");
@@ -31,16 +30,24 @@ const ProductDetailsPage = () => {
 
 				setProduct(p);
 
-				// pick first image
-				const imgs = Array.isArray(p?.images) && p.images.length ? p.images : [p?.image].filter(Boolean);
-				setSelectedImage(imgs[0] || "");
+				const variants = Array.isArray(p?.variants) ? p.variants : [];
+				const firstInStockVariant = variants.find((v) => Number(v?.stock || 0) > 0);
+				const firstVariant = firstInStockVariant || variants[0];
 
-				// default options
-				const colors = Array.isArray(p?.options?.colors) ? p.options.colors : [];
-				const sizes = Array.isArray(p?.options?.sizes) ? p.options.sizes : [];
+				const colors = getUnique(variants.map((v) => v.color).filter(Boolean));
+				const sizes = getUnique(variants.map((v) => v.size).filter(Boolean));
 
-				setSelectedColor(colors[0] || "");
-				setSelectedSize(sizes[0] || "");
+				setSelectedColor(firstVariant?.color || colors[0] || "");
+				setSelectedSize(firstVariant?.size || sizes[0] || "");
+
+				const firstImages =
+					Array.isArray(firstVariant?.images) && firstVariant.images.length
+						? firstVariant.images
+						: Array.isArray(p?.images) && p.images.length
+							? p.images
+							: [p?.image].filter(Boolean);
+
+				setSelectedImage(firstImages[0] || "");
 			} catch (e) {
 				console.error("Failed to load product:", e);
 				setError(e?.response?.data?.message || "Product not found.");
@@ -57,16 +64,76 @@ const ProductDetailsPage = () => {
 			maximumFractionDigits: 0,
 		}).format(Number(n || 0));
 
-	const galleryImages = useMemo(() => {
-		if (!product) return [];
-		const imgs = Array.isArray(product.images) ? product.images : [];
-		const base = product.image ? [product.image] : [];
-		const merged = [...base, ...imgs].filter(Boolean);
-		// remove duplicates
-		return Array.from(new Set(merged));
+	const variants = useMemo(() => {
+		return Array.isArray(product?.variants) ? product.variants : [];
 	}, [product]);
 
+	const hasVariants = variants.length > 0;
+
+	const colors = useMemo(() => {
+		if (hasVariants) return getUnique(variants.map((v) => v.color).filter(Boolean));
+		return Array.isArray(product?.options?.colors) ? product.options.colors : [];
+	}, [hasVariants, variants, product]);
+
+	const sizesForSelectedColor = useMemo(() => {
+		if (hasVariants) {
+			return getUnique(
+				variants
+					.filter((v) => {
+						if (!selectedColor) return true;
+						return same(v.color, selectedColor);
+					})
+					.map((v) => v.size)
+					.filter(Boolean)
+			);
+		}
+
+		return Array.isArray(product?.options?.sizes) ? product.options.sizes : [];
+	}, [hasVariants, variants, selectedColor, product]);
+
+	const selectedVariant = useMemo(() => {
+		if (!hasVariants) return null;
+
+		return (
+			variants.find((v) => {
+				const cOk = selectedColor ? same(v.color, selectedColor) : true;
+				const sOk = selectedSize ? same(v.size, selectedSize) : true;
+				return cOk && sOk;
+			}) || null
+		);
+	}, [hasVariants, variants, selectedColor, selectedSize]);
+
+	const galleryImages = useMemo(() => {
+		if (!product) return [];
+
+		const variantImages =
+			selectedVariant && Array.isArray(selectedVariant.images) ? selectedVariant.images : [];
+
+		const productImages = Array.isArray(product.images) ? product.images : [];
+		const base = product.image ? [product.image] : [];
+
+		const merged = variantImages.length ? variantImages : [...base, ...productImages];
+
+		return Array.from(new Set(merged.filter(Boolean)));
+	}, [product, selectedVariant]);
+
+	useEffect(() => {
+		if (galleryImages.length > 0) {
+			setSelectedImage(galleryImages[0]);
+		}
+	}, [selectedColor, selectedSize, galleryImages]);
+
 	const price = useMemo(() => Number(product?.price || 0), [product]);
+
+	const effectivePrice = useMemo(() => {
+		const override = selectedVariant?.priceOverride;
+		if (override !== null && override !== undefined && override !== "") {
+			const n = Number(override);
+			if (Number.isFinite(n) && n >= 0) return n;
+		}
+		return price;
+	}, [selectedVariant, price]);
+
 	const originalPrice = useMemo(() => {
 		const v = product?.originalPrice;
 		if (v === null || v === undefined) return null;
@@ -74,74 +141,76 @@ const ProductDetailsPage = () => {
 		return Number.isFinite(n) ? n : null;
 	}, [product]);
 
-	const isOnSale = useMemo(() => {
-		return originalPrice !== null && originalPrice > price;
-	}, [originalPrice, price]);
+	const isOnSale = originalPrice !== null && originalPrice > effectivePrice;
 
-	// ✅ Stock logic:
-	// - If stockQuantity exists -> use it
-	// - Else if variants exist -> sum stocks
+	const variantStock = selectedVariant ? Number(selectedVariant.stock || 0) : null;
+
 	const variantStockTotal = useMemo(() => {
-		if (!Array.isArray(product?.variants)) return 0;
-		return product.variants.reduce((sum, v) => sum + (Number(v?.stock) || 0), 0);
-	}, [product]);
+		return variants.reduce((sum, v) => sum + (Number(v?.stock) || 0), 0);
+	}, [variants]);
 
 	const stock = useMemo(() => {
 		if (!product) return null;
+		if (selectedVariant) return variantStock;
+		if (hasVariants) return variantStockTotal;
 		if (typeof product.stockQuantity === "number") return product.stockQuantity;
-		if (Array.isArray(product.variants) && product.variants.length) return variantStockTotal;
-		return null; // unknown
-	}, [product, variantStockTotal]);
+		return null;
+	}, [product, selectedVariant, variantStock, hasVariants, variantStockTotal]);
 
-	const lowStockThreshold = useMemo(() => {
-		if (!product) return 10;
-		return typeof product.lowStockThreshold === "number" ? product.lowStockThreshold : 10;
-	}, [product]);
+	const lowStockThreshold =
+		typeof product?.lowStockThreshold === "number" ? product.lowStockThreshold : 10;
 
 	const isOutOfStock = typeof stock === "number" && stock <= 0;
 	const isLowStock = typeof stock === "number" && stock > 0 && stock <= lowStockThreshold;
 
-	// ✅ Options
-	const colors = useMemo(() => (Array.isArray(product?.options?.colors) ? product.options.colors : []), [product]);
-	const sizes = useMemo(() => (Array.isArray(product?.options?.sizes) ? product.options.sizes : []), [product]);
-
-	// ✅ If variants exist, show availability for the selected combo
-	const selectedVariant = useMemo(() => {
-		if (!Array.isArray(product?.variants) || product.variants.length === 0) return null;
-
-		// match by provided fields (color/size may be empty if product doesn't use them)
-		return (
-			product.variants.find((v) => {
-				const cOk = selectedColor ? (v?.color || "").toLowerCase() === selectedColor.toLowerCase() : true;
-				const sOk = selectedSize ? (v?.size || "").toLowerCase() === selectedSize.toLowerCase() : true;
-				return cOk && sOk;
-			}) || null
-		);
-	}, [product, selectedColor, selectedSize]);
-
-	const variantStock = useMemo(() => {
-		if (!selectedVariant) return null;
-		return Number(selectedVariant.stock ?? 0);
-	}, [selectedVariant]);
-
-	const effectivePrice = useMemo(() => {
-		if (!product) return 0;
-		const override = selectedVariant?.priceOverride;
-		if (override !== null && override !== undefined) {
-			const n = Number(override);
-			if (Number.isFinite(n) && n >= 0) return n;
+	const colorStockMap = useMemo(() => {
+		const map = {};
+		for (const c of colors) {
+			const total = variants
+				.filter((v) => same(v.color, c))
+				.reduce((sum, v) => sum + (Number(v.stock) || 0), 0);
+			map[c] = total;
 		}
-		return price;
-	}, [product, selectedVariant, price]);
+		return map;
+	}, [colors, variants]);
+
+	const sizeStockMap = useMemo(() => {
+		const map = {};
+		for (const s of sizesForSelectedColor) {
+			const total = variants
+				.filter((v) => {
+					const cOk = selectedColor ? same(v.color, selectedColor) : true;
+					return cOk && same(v.size, s);
+				})
+				.reduce((sum, v) => sum + (Number(v.stock) || 0), 0);
+			map[s] = total;
+		}
+		return map;
+	}, [sizesForSelectedColor, variants, selectedColor]);
+
+	useEffect(() => {
+		if (!hasVariants) return;
+		if (!selectedColor) return;
+
+		const availableSizes = variants
+			.filter((v) => same(v.color, selectedColor))
+			.map((v) => v.size)
+			.filter(Boolean);
+
+		if (availableSizes.length && !availableSizes.some((s) => same(s, selectedSize))) {
+			const firstInStock = variants.find((v) => same(v.color, selectedColor) && Number(v.stock || 0) > 0);
+			setSelectedSize(firstInStock?.size || availableSizes[0] || "");
+		}
+	}, [selectedColor, hasVariants, variants, selectedSize]);
 
 	const canAddToCart = useMemo(() => {
-		// if variant exists, must have stock > 0
-		if (selectedVariant) return (variantStock ?? 0) > 0;
-		// else use product-level stock if present
+		if (hasVariants) {
+			return Boolean(selectedVariant) && Number(selectedVariant.stock || 0) > 0;
+		}
+
 		if (typeof stock === "number") return stock > 0;
-		// unknown stock -> allow
 		return true;
-	}, [selectedVariant, variantStock, stock]);
+	}, [hasVariants, selectedVariant, stock]);
 
 	const handleAddToCart = () => {
 		if (!user) {
@@ -150,62 +219,62 @@ const ProductDetailsPage = () => {
 		}
 
 		if (!canAddToCart) {
-			toast.error("This item is out of stock.");
+			toast.error("This exact option is out of stock.");
 			return;
 		}
 
-		// ✅ Keep your current cart model working:
-		// We pass extra fields, but if backend ignores them, it won’t break.
 		const payload = {
 			...product,
+			price: effectivePrice,
+			image: selectedImage || product.image,
 			selectedOptions: {
 				color: selectedColor || "",
 				size: selectedSize || "",
 				variantSku: selectedVariant?.sku || "",
 			},
+			selectedVariantStock: selectedVariant?.stock ?? null,
 		};
 
 		addToCart(payload);
 	};
 
-	if (loading) return <div className="p-6 text-gray-300">Loading product...</div>;
-	if (error) return <div className="p-6 text-red-400">{error}</div>;
-	if (!product) return <div className="p-6 text-red-400">Product not found.</div>;
+	if (loading) return <div className='p-6 text-gray-300'>Loading product...</div>;
+	if (error) return <div className='p-6 text-red-400'>{error}</div>;
+	if (!product) return <div className='p-6 text-red-400'>Product not found.</div>;
 
 	return (
-		<div className="min-h-screen">
-			<div className="relative z-10 max-w-screen-xl mx-auto px-4 sm:px-6 lg:px-8 py-10">
-				<div className="mb-6">
-					<Link to="/" className="text-emerald-400 hover:text-emerald-300 underline">
+		<div className='min-h-screen'>
+			<div className='relative z-10 max-w-screen-xl mx-auto px-4 sm:px-6 lg:px-8 py-10'>
+				<div className='mb-6'>
+					<Link to='/' className='text-emerald-400 hover:text-emerald-300 underline'>
 						← Back to Home
 					</Link>
 				</div>
 
-				<div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-					{/* ✅ Image gallery */}
-					<div className="rounded-2xl border border-gray-700 bg-gray-800 overflow-hidden p-4">
-						<div className="rounded-xl overflow-hidden border border-gray-700">
+				<div className='grid grid-cols-1 lg:grid-cols-2 gap-8'>
+					<div className='rounded-2xl border border-gray-700 bg-gray-800 overflow-hidden p-4'>
+						<div className='rounded-xl overflow-hidden border border-gray-700'>
 							<img
 								src={selectedImage || product.image}
 								alt={product.name}
-								className="w-full h-[420px] object-cover"
+								className='w-full h-[320px] sm:h-[420px] object-cover'
 							/>
 						</div>
 
 						{galleryImages.length > 1 && (
-							<div className="mt-4 grid grid-cols-4 gap-3">
+							<div className='mt-4 grid grid-cols-4 gap-3'>
 								{galleryImages.slice(0, 8).map((img) => {
 									const active = img === selectedImage;
 									return (
 										<button
 											key={img}
-											type="button"
+											type='button'
 											onClick={() => setSelectedImage(img)}
 											className={`rounded-lg overflow-hidden border transition ${
 												active ? "border-emerald-500" : "border-gray-700 hover:border-gray-500"
 											}`}
 										>
-											<img src={img} alt="thumb" className="w-full h-20 object-cover" />
+											<img src={img} alt='thumb' className='w-full h-20 object-cover' />
 										</button>
 									);
 								})}
@@ -213,68 +282,60 @@ const ProductDetailsPage = () => {
 						)}
 					</div>
 
-					{/* ✅ Details */}
-					<div className="rounded-2xl border border-gray-700 bg-gray-800 p-6">
-						<div className="flex items-start justify-between gap-4">
-							<h1 className="text-3xl font-bold text-white">{product.name}</h1>
-
-							{/* Stock badge */}
-							{isOutOfStock && (
-								<span className="shrink-0 inline-flex items-center rounded-full bg-gray-900/80 px-3 py-1 text-xs font-semibold text-gray-200 border border-gray-700">
-									Out of stock
-								</span>
-							)}
-							{!isOutOfStock && isLowStock && (
-								<span className="shrink-0 inline-flex items-center rounded-full bg-amber-500/90 px-3 py-1 text-xs font-semibold text-black">
-									Only {stock} left
-								</span>
-							)}
-							{!isOutOfStock && !isLowStock && typeof stock === "number" && (
-								<span className="shrink-0 inline-flex items-center rounded-full bg-emerald-600/90 px-3 py-1 text-xs font-semibold text-white">
-									In stock
-								</span>
-							)}
+					<div className='rounded-2xl border border-gray-700 bg-gray-800 p-6'>
+						<div className='flex items-start justify-between gap-4'>
+							<h1 className='text-3xl font-bold text-white'>{product.name}</h1>
+							<StockBadge isOutOfStock={isOutOfStock} isLowStock={isLowStock} stock={stock} />
 						</div>
 
-						<p className="text-gray-300 mt-3 mb-5">{product.description}</p>
+						<p className='text-gray-300 mt-3 mb-5'>{product.description}</p>
 
-						{/* Pricing */}
-						<div className="flex items-end gap-3 mb-6">
-							<span className="text-4xl font-extrabold text-emerald-400">
+						<div className='flex items-end gap-3 mb-6'>
+							<span className='text-4xl font-extrabold text-emerald-400'>
 								{formatZar(effectivePrice)}
 							</span>
 
 							{isOnSale && (
-								<span className="text-lg text-gray-400 line-through">{formatZar(originalPrice)}</span>
+								<span className='text-lg text-gray-400 line-through'>{formatZar(originalPrice)}</span>
 							)}
 
-							<span className="text-sm text-gray-400 mb-1">ZAR</span>
+							<span className='text-sm text-gray-400 mb-1'>ZAR</span>
 						</div>
 
-						<div className="text-sm text-gray-400 mb-6">
-							Category: <span className="text-gray-200">{product.category}</span>
+						<div className='text-sm text-gray-400 mb-6'>
+							Category: <span className='text-gray-200'>{product.category}</span>
 						</div>
 
-						{/* ✅ Options (colors/sizes) */}
-						<div className="space-y-5 mb-6">
+						<div className='space-y-5 mb-6'>
 							{colors.length > 0 && (
 								<div>
-									<p className="text-sm text-gray-300 mb-2">Color</p>
-									<div className="flex flex-wrap gap-2">
+									<p className='text-sm text-gray-300 mb-2'>Color</p>
+									<div className='flex flex-wrap gap-2'>
 										{colors.map((c) => {
-											const active = c === selectedColor;
+											const active = same(c, selectedColor);
+											const colorOut = hasVariants && Number(colorStockMap[c] || 0) <= 0;
+
 											return (
 												<button
 													key={c}
-													type="button"
-													onClick={() => setSelectedColor(c)}
-													className={`px-3 py-2 rounded-lg border text-sm transition ${
+													type='button'
+													onClick={() => {
+														setSelectedColor(c);
+														const firstInStock = variants.find(
+															(v) => same(v.color, c) && Number(v.stock || 0) > 0
+														);
+														const firstAny = variants.find((v) => same(v.color, c));
+														setSelectedSize(firstInStock?.size || firstAny?.size || "");
+													}}
+													disabled={colorOut}
+													className={`px-3 py-2 rounded-lg border text-sm transition relative ${
 														active
 															? "border-emerald-500 bg-emerald-600/15 text-emerald-200"
 															: "border-gray-700 hover:border-gray-500 text-gray-200"
-													}`}
+													} ${colorOut ? "opacity-45 cursor-not-allowed line-through" : ""}`}
 												>
 													{c}
+													{colorOut && <span className='ml-2 text-xs'>(Out)</span>}
 												</button>
 											);
 										})}
@@ -282,24 +343,28 @@ const ProductDetailsPage = () => {
 								</div>
 							)}
 
-							{sizes.length > 0 && (
+							{sizesForSelectedColor.length > 0 && (
 								<div>
-									<p className="text-sm text-gray-300 mb-2">Size</p>
-									<div className="flex flex-wrap gap-2">
-										{sizes.map((s) => {
-											const active = s === selectedSize;
+									<p className='text-sm text-gray-300 mb-2'>Size</p>
+									<div className='flex flex-wrap gap-2'>
+										{sizesForSelectedColor.map((s) => {
+											const active = same(s, selectedSize);
+											const sizeOut = hasVariants && Number(sizeStockMap[s] || 0) <= 0;
+
 											return (
 												<button
 													key={s}
-													type="button"
+													type='button'
 													onClick={() => setSelectedSize(s)}
+													disabled={sizeOut}
 													className={`px-3 py-2 rounded-lg border text-sm transition ${
 														active
 															? "border-emerald-500 bg-emerald-600/15 text-emerald-200"
 															: "border-gray-700 hover:border-gray-500 text-gray-200"
-													}`}
+													} ${sizeOut ? "opacity-45 cursor-not-allowed line-through" : ""}`}
 												>
 													{s}
+													{sizeOut && <span className='ml-2 text-xs'>(Out)</span>}
 												</button>
 											);
 										})}
@@ -307,13 +372,23 @@ const ProductDetailsPage = () => {
 								</div>
 							)}
 
-							{/* Variant availability */}
 							{selectedVariant && (
-								<div className="text-sm text-gray-400">
-									Selected variant stock:{" "}
-									<span className="text-gray-200 font-semibold">
-										{variantStock ?? 0}
+								<div className='rounded-lg border border-gray-700 bg-gray-900 p-3 text-sm text-gray-300'>
+									Selected:{" "}
+									<span className='text-white font-semibold'>
+										{selectedColor || "-"} / {selectedSize || "-"}
 									</span>
+									{" • "}
+									Stock:{" "}
+									<span className={variantStock > 0 ? "text-emerald-400 font-semibold" : "text-red-400 font-semibold"}>
+										{variantStock}
+									</span>
+									{selectedVariant?.sku && (
+										<>
+											{" • "}
+											SKU: <span className='text-gray-200'>{selectedVariant.sku}</span>
+										</>
+									)}
 								</div>
 							)}
 						</div>
@@ -321,22 +396,52 @@ const ProductDetailsPage = () => {
 						<button
 							onClick={handleAddToCart}
 							disabled={!canAddToCart}
-							className={`w-full flex items-center justify-center gap-2 rounded-lg px-5 py-3 text-sm font-semibold
-							focus:outline-none focus:ring-4 focus:ring-emerald-300 transition
-							${!canAddToCart ? "bg-gray-700 text-gray-300 cursor-not-allowed" : "bg-emerald-600 text-white hover:bg-emerald-700"}`}
+							className={`w-full flex items-center justify-center gap-2 rounded-lg px-5 py-3 text-sm font-semibold focus:outline-none focus:ring-4 focus:ring-emerald-300 transition ${
+								!canAddToCart
+									? "bg-gray-700 text-gray-300 cursor-not-allowed"
+									: "bg-emerald-600 text-white hover:bg-emerald-700"
+							}`}
 						>
 							<ShoppingCart size={18} />
 							{!canAddToCart ? "Out of stock" : "Add to cart"}
 						</button>
-
-						<p className="text-xs text-gray-500 mt-4">
-							Note: Variants/stock will show as you add them in Admin when we upgrade the product create form.
-						</p>
 					</div>
 				</div>
 			</div>
 		</div>
 	);
 };
+
+const StockBadge = ({ isOutOfStock, isLowStock, stock }) => {
+	if (isOutOfStock) {
+		return (
+			<span className='shrink-0 inline-flex items-center rounded-full bg-gray-900/80 px-3 py-1 text-xs font-semibold text-gray-200 border border-gray-700'>
+				Out of stock
+			</span>
+		);
+	}
+
+	if (isLowStock) {
+		return (
+			<span className='shrink-0 inline-flex items-center rounded-full bg-amber-500/90 px-3 py-1 text-xs font-semibold text-black'>
+				Only {stock} left
+			</span>
+		);
+	}
+
+	if (typeof stock === "number") {
+		return (
+			<span className='shrink-0 inline-flex items-center rounded-full bg-emerald-600/90 px-3 py-1 text-xs font-semibold text-white'>
+				In stock
+			</span>
+		);
+	}
+
+	return null;
+};
+
+const same = (a, b) => String(a || "").toLowerCase() === String(b || "").toLowerCase();
+
+const getUnique = (list) => Array.from(new Set((list || []).filter(Boolean)));
 
 export default ProductDetailsPage;
