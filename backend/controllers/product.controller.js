@@ -190,6 +190,232 @@ export const createProduct = async (req, res) => {
 	}
 };
 
+export const updateProduct = async (req, res) => {
+	try {
+		const { id } = req.params;
+
+		if (!isMongoId(id)) {
+			return res.status(400).json({ message: "Invalid product id" });
+		}
+
+		const product = await Product.findById(id);
+
+		if (!product) {
+			return res.status(404).json({ message: "Product not found" });
+		}
+
+		const {
+			name,
+			description,
+			price,
+			originalPrice,
+			image,
+			images,
+			category,
+			stockQuantity,
+			lowStockThreshold,
+			options,
+			variants,
+		} = req.body;
+
+		if (name !== undefined) {
+			product.name = String(name).trim();
+		}
+
+		if (description !== undefined) {
+			product.description = String(description).trim();
+		}
+
+		if (category !== undefined) {
+			product.category = String(category).trim();
+		}
+
+		if (price !== undefined) {
+			const parsedPrice = Number(price);
+
+			if (!Number.isFinite(parsedPrice) || parsedPrice < 0) {
+				return res.status(400).json({
+					message: "Invalid product price",
+				});
+			}
+
+			product.price = parsedPrice;
+		}
+
+		if (originalPrice !== undefined) {
+			if (
+				originalPrice === null ||
+				originalPrice === ""
+			) {
+				product.originalPrice = null;
+			} else {
+				const parsedOriginalPrice = Number(originalPrice);
+
+				product.originalPrice =
+					Number.isFinite(parsedOriginalPrice) &&
+					parsedOriginalPrice > Number(product.price)
+						? parsedOriginalPrice
+						: null;
+			}
+		}
+
+		if (stockQuantity !== undefined) {
+			const parsedStock = Number(stockQuantity);
+
+			product.stockQuantity =
+				Number.isFinite(parsedStock) && parsedStock >= 0
+					? parsedStock
+					: 0;
+		}
+
+		if (lowStockThreshold !== undefined) {
+			const parsedThreshold = Number(lowStockThreshold);
+
+			product.lowStockThreshold =
+				Number.isFinite(parsedThreshold) &&
+				parsedThreshold >= 0
+					? parsedThreshold
+					: 10;
+		}
+
+		/*
+		 * MAIN IMAGE
+		 *
+		 * Existing Cloudinary URL:
+		 * -> kept exactly as-is.
+		 *
+		 * New Base64 image:
+		 * -> uploaded to Cloudinary.
+		 */
+		if (image !== undefined && image) {
+			product.image =
+				await uploadOneImageToCloudinary(image);
+		}
+
+		/*
+		 * GENERAL GALLERY
+		 *
+		 * Existing URLs stay untouched.
+		 * New Base64 images are uploaded.
+		 *
+		 * The main image is deliberately excluded from the
+		 * submitted gallery here. The Product model's save hook
+		 * can maintain the main image relationship itself.
+		 */
+		if (images !== undefined) {
+			const galleryInput = Array.isArray(images)
+				? images.filter(
+						(img) => img && img !== product.image
+					)
+				: [];
+
+			const uploadedGallery =
+				await uploadManyImagesToCloudinary(galleryInput);
+
+			product.images = Array.from(
+				new Set(uploadedGallery.filter(Boolean))
+			);
+		}
+
+		if (options !== undefined) {
+			product.options = {
+				colors: Array.isArray(options?.colors)
+					? Array.from(
+							new Set(
+								options.colors
+									.map((value) =>
+										String(value || "").trim()
+									)
+									.filter(Boolean)
+							)
+						)
+					: [],
+
+				sizes: Array.isArray(options?.sizes)
+					? Array.from(
+							new Set(
+								options.sizes
+									.map((value) =>
+										String(value || "").trim()
+									)
+									.filter(Boolean)
+							)
+						)
+					: [],
+			};
+		}
+
+		/*
+		 * VARIANTS
+		 *
+		 * Every submitted variant replaces the previous
+		 * variant configuration.
+		 *
+		 * Existing image URLs stay untouched.
+		 * New Base64 images are uploaded.
+		 */
+		if (variants !== undefined) {
+			product.variants =
+				await cleanVariantsWithUploadedImages(variants);
+		}
+
+		/*
+		 * Rebuild colors/sizes from actual variants.
+		 *
+		 * This prevents the storefront from showing an option
+		 * that no longer exists after editing.
+		 */
+		if (
+			Array.isArray(product.variants) &&
+			product.variants.length > 0
+		) {
+			product.options = {
+				colors: Array.from(
+					new Set(
+						product.variants
+							.map((variant) =>
+								String(
+									variant.color || ""
+								).trim()
+							)
+							.filter(Boolean)
+					)
+				),
+
+				sizes: Array.from(
+					new Set(
+						product.variants
+							.map((variant) =>
+								String(
+									variant.size || ""
+								).trim()
+							)
+							.filter(Boolean)
+					)
+				),
+			};
+		}
+
+		const updatedProduct = await product.save();
+
+		await updateFeaturedProductsCache();
+
+		return res.json({
+			product: updatedProduct,
+		});
+	} catch (error) {
+		console.log(
+			"Error in updateProduct controller",
+			error.message
+		);
+
+		return res.status(500).json({
+			message: "Server error",
+			error: error.message,
+		});
+	}
+};
+
 export const deleteProduct = async (req, res) => {
 	try {
 		const product = await Product.findById(req.params.id);

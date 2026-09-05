@@ -141,7 +141,7 @@ const PurchaseSuccessPage = () => {
 	// Fallback bank details
 	const BANK = bankDetails || {
 		bankName: "Capitec Bank",
-		accountHolder: "Nduduzo Nene",
+		accountHolder: "NB Nene",
 		accountNumber: "1579559245",
 		branchCode: "470010",
 		accountType: "Savings",
